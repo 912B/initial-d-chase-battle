@@ -337,23 +337,42 @@ end
     *   服务端广播 `CHASE_RESULT`。
     *   客户端展示结算动画。
 
-## 7. 安装步骤
+### 通信命令结构 (Command Structure)
 
-为了确保可靠性，使用以下聊天命令结构 (如果可能，使用隐藏命令):
+为了确保可靠性，使用以下聊天命令结构 (如果可能，隐藏命令):
 
 1.  **挑战 (Challenge)**: `服务端 -> 目标`: "玩家 A 向您发起挑战! 输入 /accept 开始。"
 2.  **开始 (Start)**: `服务端 -> 所有人`: "CHASE_START: [车手A] vs [车手B]"
 3.  **更新 (Update)**: `服务端 -> 客户端`: (可选) "GAP: 5.2s" (每隔几秒广播一次)
 4.  **结束 (Finish)**: `服务端 -> 所有人`: "WINNER: [车手A] (原因: 超越 / 甩开)"
 
-## 7. 安装步骤
+## 7. 安装步骤 (Installation)
 
 1.  **服务端**: 编译 C# 插件并将 DLL 放入 `AssettoServer/plugins/` 目录。
 2.  **客户端**: 将 `chase_battle` 文件夹放入 `content/gui/apps/lua/` 或 `apps/lua/` (取决于安装方式)。
 3.  **配置**: 在 `server_cfg.ini` 中启用插件 (如果 AssettoServer 需要)。
 
-## 8. 后续开发计划
+## 8. 后续开发计划 (Future Plans)
 
 1.  完善 `ChaseBattle.cs` 以处理状态机 (待处理 -> 倒计时 -> 比赛中)。
 2.  增强 `chase_battle.lua`，使用 `ac.getCarState` 获取更多遥测数据 (转速, 涡轮压力)。
 3.  实现 "突然死亡" (Sudden Death) 机制 (如果差距在 X 秒内保持很小，延长比赛)。
+
+## 9. 技术实现细节补充 (Technical Implementation Details)
+
+### A. 传送机制 (Teleportation)
+由于 Assetto Corsa 物理引擎的限制，直接修改车辆物理坐标较为困难。
+我们计划尝试以下方案：
+1.  **可视节点位移**: 使用 `ac.findNodes('carRoot:<Index>'):setPosition(pos)` 尝试移动车辆模型根节点。
+2.  **重置回维修区 (Fallback)**: 如果直接传送导致物理异常，将使用 `Reset to Pits` 命令（通过 Server 插件或 `ac.console`）。
+
+### B. 油门锁定 (Throttle Locking)
+利用 CSP 的 `Extra Tweaks` 远程加载 Lua 脚本功能，注入控制覆盖逻辑。
+*   **API**: `ac.overrideCarState(key, value)`
+*   **逻辑**: 当玩家被判定为“非参赛状态”时，脚本每帧调用：
+    ```lua
+    ac.overrideCarState('gas', 0)
+    ac.overrideCarState('brake', 1)
+    ac.overrideCarState('steer', 0)
+    ```
+*   **解锁**: 比赛开始或倒计时结束时，停止调用 override 函数。
