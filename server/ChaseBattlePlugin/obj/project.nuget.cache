@@ -1,0 +1,20 @@
+{
+  "version": 2,
+  "dgSpecHash": "8vg0lDluL64=",
+  "success": false,
+  "projectFilePath": "/home/f13/workspace/initial-d-chase-battle/server/ChaseBattlePlugin/ChaseBattlePlugin.csproj",
+  "expectedPackageFiles": [
+    "/home/f13/.nuget/packages/serilog/2.12.0/serilog.2.12.0.nupkg.sha512"
+  ],
+  "logs": [
+    {
+      "code": "NU1101",
+      "level": "Error",
+      "message": "找不到包 AssettoServer。源 nuget.org 中不存在具有此 ID 的包",
+      "libraryId": "AssettoServer",
+      "targetGraphs": [
+        "net8.0"
+      ]
+    }
+  ]
+}
