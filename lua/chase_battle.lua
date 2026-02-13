@@ -7,6 +7,9 @@ local carChaser = nil
 local role = "SPECTATOR" -- "LEADER", "CHASER", "SPECTATOR"
 local battleActive = false
 local battleOpponentName = ""
+
+-- UI State
+local isWaitingForServer = false -- Prevent double clicking VS button
 local startLapLeader = 0
 local startLapChaser = 0
 
@@ -39,24 +42,27 @@ local colGreen = rgbm(0, 1, 0, 1)       -- GO signal
 local function handleChaseMessage(message, author)
     if message:find("CHASE_START:") then
         ac.log("Received CHASE_START raw: " .. message)
+        -- Identify IDs
         local l_id, c_id = message:match("CHASE_START:%s*(%d+)%s*vs%s*(%d+)")
+        
         if l_id and c_id then
             local leaderId = tonumber(l_id)
             local chaserId = tonumber(c_id)
             local myId = ac.getSim().focusedCar
             
-            ac.log("Chase Init: LeaderSlot="..tostring(leaderId).." ChaserSlot="..tostring(chaserId).." MeIdx="..tostring(myId))
+            ac.log("CHASE_START Signal: " .. leaderId .. " vs " .. chaserId .. ". Me=" .. tostring(myId))
             
             -- Resolve cars by Server Slot
             local leaderCarObj = ac.getCar.serverSlot(leaderId)
             local chaserCarObj = ac.getCar.serverSlot(chaserId)
 
             -- Fallback for Offline/Simulation if ServerSlot returns nil
-            -- 999 is used by the Simulation buttons as a dummy opponent
             if not leaderCarObj and (leaderId == 0 or leaderId == 999) then leaderCarObj = ac.getCar(0) end
             if not chaserCarObj and (chaserId == 0 or chaserId == 999) then chaserCarObj = ac.getCar(0) end
 
             if leaderCarObj and chaserCarObj then
+                ac.log("Resolved Cars: L="..tostring(leaderCarObj.index) .. " C="..tostring(chaserCarObj.index).. " Me="..tostring(myId))
+                
                 if tonumber(myId) == tonumber(leaderCarObj.index) then
                     carLeader = leaderCarObj
                     carChaser = chaserCarObj
@@ -65,32 +71,47 @@ local function handleChaseMessage(message, author)
                     local dName = carChaser.driverName
                     if type(dName) == "function" then dName = dName(carChaser) end
                     battleOpponentName = dName
-                    ac.log("Battle Started: You are LEADER")
-                    ui.toast(ui.Icons.Confirm, "Battle Start! You are LEADER")
-                    -- Grid 1 is Downhill (Front) on inverted tracks, Grid 0 is Uphill (Back)
+                    ac.log("Battle Started: You are LEADER. Teleporting to Grid 1...")
+                    ui.toast(ui.Icons.Confirm, "BATTLE START! (Leader)")
+                    battleOpponentName = dName
+                    ac.log("Battle Started: You are LEADER. Teleporting to Grid 1...")
+                    ui.toast(ui.Icons.Confirm, "BATTLE START! (Leader)")
+                    isWaitingForServer = false -- Reset waiting state
                     teleportToGrid(1)
                 elseif tonumber(myId) == tonumber(chaserCarObj.index) then
                     carLeader = leaderCarObj
-                    carChaser = carChaser
+                    carChaser = chaserCarObj
                     role = "CHASER"
                     battleActive = true
                     local dName = carLeader.driverName
                     if type(dName) == "function" then dName = dName(carLeader) end
                     battleOpponentName = dName
-                     ac.log("Battle Started: You are CHASER")
-                     ui.toast(ui.Icons.Confirm, "Battle Start! You are CHASER")
+                     ac.log("Battle Started: You are CHASER. Teleporting to Grid 0...")
+                     ui.toast(ui.Icons.Confirm, "BATTLE START! (Chaser)")
+                     ac.log("Battle Started: You are CHASER. Teleporting to Grid 0...")
+                     ui.toast(ui.Icons.Confirm, "BATTLE START! (Chaser)")
+                     isWaitingForServer = false -- Reset waiting state
                      teleportToGrid(0)
+                else
+                    ac.log("Chase Msg received but not involved (Me="..tostring(myId)..")")
                 end
             else
-                 ac.log("Error: Could not resolve cars from slots " .. leaderId .. "/" .. chaserId)
-                 if message:find("Simulate") then ui.toast(ui.Icons.Warning, "Sim Error: Car resolution failed") end
+                 local errMsg = "Error resolving cars: L=" .. tostring(leaderCarObj) .. " C=" .. tostring(chaserCarObj)
+                 ac.log(errMsg)
             end
+        else
+            ac.log("Failed to parse IDs from CHASE_START: " .. message)
         end
     end
     -- CHASE_END logic would go here if needed
 end
 
 function script.update(dt)
+    if not _logTestDone then
+        ac.log("LUA_LOG_TEST: Script update loop is running.")
+        _logTestDone = true
+    end
+
     -- Countdown & Input Lock (Freeze Method)
     if countdownActive then
         countdownTimer = countdownTimer - dt
@@ -133,7 +154,7 @@ function script.update(dt)
             -- Leader escaped
             ac.sendChatMessage("/chasereport LOSS") -- Leader Escaped = Chaser Loss
             -- Local reset handled by CHASE_END broadcast
-        elseif distance < -5 then -- Chaser is ahead (Overtake) with buffer
+        elseif distance < -5 then -- Chaser is ahead (Overtake) 
              -- Chaser Overtook
             ac.sendChatMessage("/chasereport WIN") -- Chaser Overtook = Chaser Win
             -- Local reset handled by CHASE_END broadcast
@@ -150,6 +171,12 @@ function script.drawUI()
     -- 1. Draw Battle HUD (if active)
     if battleActive and carLeader and carChaser then
         drawBattleHUD(uiState)
+    elseif battleActive then
+        -- Debug: Why is HUD not drawing if battle is active?
+        -- Rate limit logs
+        if math.random() < 0.01 then 
+            ac.log("UI_DEBUG: Battle Active but Cars Nil? Leader="..tostring(carLeader).." Chaser="..tostring(carChaser)) 
+        end
     end
 
     -- 2. Draw Leaderboard (Always visible or toggleable? Keeping always visible for now)
@@ -169,6 +196,14 @@ function script.drawUI()
     if countdownActive then
         drawCountdown(uiState)
     end
+    if countdownActive then
+        drawCountdown(uiState)
+    end
+end
+
+-- Fallback Draw Listener
+if ac.onDrawUI then
+    ac.onDrawUI(script.drawUI)
 end
 
 function drawCountdown(uiState)
@@ -433,6 +468,9 @@ function drawLeaderboard(uiState)
                 elseif battleActive and isMe then
                      statusText = "BATTLE"
                      statusCol = colRed
+                elseif isWaitingForServer and isMe then
+                     statusText = "WAIT..."
+                     statusCol = colYellow
                 elseif not battleActive then
                      statusText = "FREE"
                      statusCol = rgbm(0,1,0,1)
@@ -454,9 +492,16 @@ function drawLeaderboard(uiState)
                     
                     -- Use native ui.button
                     if ui.button("VS##"..item.slot, vec2(btnWidth, btnHeight)) then
-                         -- Action: Challenge
-                         local cmd = "/chase " .. item.slot
-                         ac.sendChatMessage(cmd)
+                         if not isWaitingForServer then
+                             -- Action: Challenge
+                             isWaitingForServer = true
+                             local cmd = "/chase " .. item.slot
+                             ac.sendChatMessage(cmd)
+                             ui.toast(ui.Icons.Confirm, "Request Sent...")
+                             
+                             -- Timeout reset (failsafe)
+                             setTimeout(function() isWaitingForServer = false end, 5000)
+                         end
                     end
                     ui.popStyleColor(3)
 
@@ -528,10 +573,30 @@ end
 -- Chat Message Handling Logic (Separated for Simulation)
 
 
--- Bind to script event
+-- Bind to script event (Original)
 function script.onChatMessage(message, author)
+    ac.log("LUA_DEBUG: script.onChatMessage triggered. Msg='" .. message .. "'")
     handleChaseMessage(message, author)
-    -- Also handle CHASE_END
+    checkChaseEnd(message)
+end
+
+-- Bind to global event (Alternative 1)
+function onChatMessage(message, author)
+    ac.log("LUA_DEBUG: global onChatMessage triggered. Msg='" .. message .. "'")
+    handleChaseMessage(message, author)
+    checkChaseEnd(message)
+end
+
+-- Bind using ac.onChatMessage if available (Alternative 2)
+if ac.onChatMessage then
+    ac.onChatMessage(function(message, author)
+        ac.log("LUA_DEBUG: ac.onChatMessage triggered. Msg='" .. message .. "'")
+        handleChaseMessage(message, author)
+        checkChaseEnd(message)
+    end)
+end
+
+function checkChaseEnd(message)
     if message:find("CHASE_END") then
         local l_id_str = message:match("CHASE_END:%s*(%d+)")
         local l_id = tonumber(l_id_str)
@@ -566,7 +631,6 @@ function teleportToGrid(gridIndex)
 
     if not car.physicsAvailable then
         ac.log("TELEPORT DEBUG: Car physics NOT available (physicsAvailable=false)")
-        ui.toast(ui.Icons.Warning, "Teleport failed: Physics not available yet")
         return
     end
 

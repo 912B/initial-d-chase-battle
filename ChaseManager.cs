@@ -59,6 +59,7 @@ public class ChaseManager
         Log.Information($"Chase Battle Started: {leader.Name} (Leader) vs {chaser.Name} (Chaser)");
         
         // Notify clients to start Lua logic
+        // Notify clients to start Lua logic
         _entryCarManager.BroadcastPacket(new ChatMessage { SessionId = 255, Message = $"CHASE_START: {leader.SessionId} vs {chaser.SessionId}" });
 
         return true;

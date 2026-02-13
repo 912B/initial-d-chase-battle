@@ -13,11 +13,22 @@ public class ChaseBattlePlugin : BackgroundService
     public ChaseBattlePlugin(ChaseManager chaseManager, CSPServerScriptProvider scriptProvider)
     {
         _chaseManager = chaseManager;
-        var stream = Assembly.GetExecutingAssembly().GetManifestResourceStream("ChaseBattlePlugin.lua.chase_battle.lua");
+        
+        var assembly = Assembly.GetExecutingAssembly();
+        var resources = assembly.GetManifestResourceNames();
+        Log.Information($"[ChaseBattlePlugin] Found {resources.Length} resources: {string.Join(", ", resources)}");
+
+        var resourceName = "ChaseBattlePlugin.lua.chase_battle.lua";
+        var stream = assembly.GetManifestResourceStream(resourceName);
         if (stream != null)
+        {
              scriptProvider.AddScript(stream, "chase_battle.lua");
+             Log.Information($"[ChaseBattlePlugin] Successfully added Lua script: {resourceName}");
+        }
         else
-             Log.Error("Could not find embedded resource: ChaseBattlePlugin.lua.chase_battle.lua");
+        {
+             Log.Error($"[ChaseBattlePlugin] Could not find embedded resource: {resourceName}");
+        }
     }
 
     protected override Task ExecuteAsync(CancellationToken stoppingToken)
