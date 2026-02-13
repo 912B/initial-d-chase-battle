@@ -32,7 +32,9 @@ public class ChaseManager
         var otherPlayer = battle.Leader == client ? battle.Chaser : battle.Leader;
         if (otherPlayer.IsConnected)
         {
-             otherPlayer.SendPacket(new ChatMessage { SessionId = 255, Message = "Chase Battle Ended: Opponent disconnected." });
+             // Disconnection Win Logic
+             string role = battle.Leader == client ? "Leader" : "Chaser";
+             _entryCarManager.BroadcastPacket(new ChatMessage { SessionId = 255, Message = $"Chase Result: {otherPlayer.Name} WON! (Opponent Disconnected)" });
              otherPlayer.SendPacket(new ChatMessage { SessionId = 255, Message = $"CHASE_END: {battle.Leader.SessionId}" }); 
         }
     }
@@ -88,6 +90,14 @@ public class ChaseManager
             {
                  _entryCarManager.BroadcastPacket(new ChatMessage { SessionId = 255, Message = "Could not auto-start swap battle." });
             }
+        }
+        else if (result == "GIVEUP")
+        {
+            Log.Information($"Chase Forfeit: {reporter.Name} gave up.");
+            // Reporter lost
+            var winner = battle.Leader == reporter ? battle.Chaser : battle.Leader;
+            string message = $"Chase Result: {winner.Name} WON! ({reporter.Name} gave up)";
+            _entryCarManager.BroadcastPacket(new ChatMessage { SessionId = 255, Message = message });
         }
         else
         {

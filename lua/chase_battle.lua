@@ -40,6 +40,19 @@ local colGreen = rgbm(0, 1, 0, 1)       -- GO signal
 -- Chat Message Handling Logic (Separated for Simulation)
 -- Defined early so it can be called by UI functions
 local function handleChaseMessage(message, author)
+    -- Error Handling: Reset waiting state if server rejects request
+    if message:find("Invalid target ID") or 
+       message:find("Cannot chase AI") or 
+       message:find("Target is not connected") or 
+       message:find("You cannot chase yourself") or 
+       message:find("Could not start chase") then
+        
+        isWaitingForServer = false
+        ui.toast(ui.Icons.Warning, "Chase Request Failed")
+        ac.log("Chase Request Rejected: " .. message)
+        return
+    end
+
     if message:find("CHASE_START:") then
         ac.log("Received CHASE_START raw: " .. message)
         -- Identify IDs
@@ -131,6 +144,15 @@ function script.update(dt)
         end
     end
 
+    -- 1. Check for "Back to Pits" (Instant Loss)
+    local car = ac.getCar(ac.getSim().focusedCar)
+    if car.isInPitlane then
+         ac.sendChatMessage("/chasereport GIVEUP")
+         ui.toast(ui.Icons.Warning, "Returned to Pits - Battle Forfeited")
+         -- Local reset will happen via CHASE_END broadcast
+         return
+    end
+
     if not battleActive then return end
 
     if not carLeader or not carChaser then return end
@@ -147,6 +169,14 @@ function script.update(dt)
     -- If loop track support is needed, checking (0.9 vs 0.1) wrap-around is required
     local distance = (leaderSpline - chaserSpline) * trackLength
     
+    -- DEBUG: Log Distance
+    if not distanceDebugTimer then distanceDebugTimer = 0 end
+    distanceDebugTimer = distanceDebugTimer + dt
+    if distanceDebugTimer > 1.0 then
+        ac.log(string.format("RACE DEBUG: Dist=%.2f LeaderSpline=%.4f ChaserSpline=%.4f TrackLen=%.0f", distance, leaderSpline, chaserSpline, trackLength))
+        distanceDebugTimer = 0
+    end
+
     -- 3. Check End Conditions
     -- Avoid instant finish if cars are spawned at strange locations (sanity check distance < trackLength/2)
     if math.abs(distance) < trackLength / 2 then
@@ -709,7 +739,7 @@ function teleportToGrid(gridIndex)
                  -- Trigger Countdown
                  if battleActive then
                      countdownActive = true
-                     countdownTimer = 3.0 -- 3 seconds countdown
+                     countdownTimer = 5.0 -- 5 seconds countdown
                      
                      -- Store Freeze Position
                      countdownFreezePos = position
