@@ -124,75 +124,71 @@ function CB_Admin.DrawAdminPanel()
     local sim = ac.getSim()
     local isAuthorized = CB_Admin.IsAdmin or sim.isAdmin
 
-    -- Draw an interactive UI Window explicitly on screen
-    -- beginWindow natively catches mouse interactions
-    ui.beginWindow("Chase Battle Admin", vec2(20, 100), vec2(300, 380))
-    
-    if not isAuthorized then
-        ui.text("You are not currently authorized as Admin.")
-        if ui.button("Check Admin Privileges") then
-            ac.checkAdminPrivileges()
+    -- Use ui.window to create an interactive standard panel
+    ui.window("Chase Battle Admin", vec2(20, 100), vec2(300, 380), function()
+        if not isAuthorized then
+            ui.text("You are not currently authorized as Admin.")
+            if ui.button("Check Admin Privileges") then
+                ac.checkAdminPrivileges()
+            end
+            return
         end
-        ui.endWindow()
-        return
-    end
 
-    ui.text("Status: " .. CB_Battle.GetStateName())
-    ui.SameLine()
-    if ui.button("Force Refresh") then CB_Admin.RefreshDrivers() end
-    
-    ui.separator()
-    
-    -- Selection UI
-    ui.text("LEADER: " .. (ac.getDriverName(CB_Admin.SelectedLeader) or "None"))
-    ui.text("CHASER: " .. (ac.getDriverName(CB_Admin.SelectedChaser) or "None"))
-    
-    ui.separator()
-    ui.text("Player List:")
-    
-    ui.beginChild("PlayerList", vec2(0, 150), true)
-    for _, driver in ipairs(CB_Admin.Drivers) do
-         ui.pushID(driver.id)
-         if ui.button("L") then CB_Admin.SelectedLeader = driver.id end
-         ui.SameLine()
-         if ui.button("C") then CB_Admin.SelectedChaser = driver.id end
-         ui.SameLine()
-         
-         local color = rgbm(1,1,1,1)
-         if driver.id == CB_Admin.SelectedLeader then color = rgbm(0,1,0,1) end
-         if driver.id == CB_Admin.SelectedChaser then color = rgbm(1,0,0,1) end
-         ui.textColored(driver.name .. " ("..driver.id..")", color)
-         
-         ui.popID()
-    end
-    ui.endChild()
-
-    ui.separator()
-    
-    if ui.button("SET CONTESTANTS", vec2(-1, 0)) then
-        if CB_Admin.SelectedLeader ~= -1 and CB_Admin.SelectedChaser ~= -1 then
-             ac.sendChatMessage("/chase_cmd SET_ROLES " .. CB_Admin.SelectedLeader .. "," .. CB_Admin.SelectedChaser)
-        else
-             ac.log("Please select both Leader and Chaser.")
+        ui.text("Status: " .. CB_Battle.GetStateName())
+        ui.SameLine()
+        if ui.button("Force Refresh") then CB_Admin.RefreshDrivers() end
+        
+        ui.separator()
+        
+        -- Selection UI
+        ui.text("LEADER: " .. (ac.getDriverName(CB_Admin.SelectedLeader) or "None"))
+        ui.text("CHASER: " .. (ac.getDriverName(CB_Admin.SelectedChaser) or "None"))
+        
+        ui.separator()
+        ui.text("Player List:")
+        
+        ui.beginChild("PlayerList", vec2(0, 150), true)
+        for _, driver in ipairs(CB_Admin.Drivers) do
+             ui.pushID(driver.id)
+             if ui.button("L") then CB_Admin.SelectedLeader = driver.id end
+             ui.SameLine()
+             if ui.button("C") then CB_Admin.SelectedChaser = driver.id end
+             ui.SameLine()
+             
+             local color = rgbm(1,1,1,1)
+             if driver.id == CB_Admin.SelectedLeader then color = rgbm(0,1,0,1) end
+             if driver.id == CB_Admin.SelectedChaser then color = rgbm(1,0,0,1) end
+             ui.textColored(driver.name .. " ("..driver.id..")", color)
+             
+             ui.popID()
         end
-    end
-    
-    ui.separator()
-    
-    local startColor = rgbm(0,1,0,0.5)
-    local stopColor = rgbm(1,0,0,0.5)
-    
-    ui.pushStyleColor(ui.StyleColor.Button, startColor)
-    if ui.button("START BATTLE", vec2(130, 0)) then ac.sendChatMessage("/chase_cmd START") end
-    ui.popStyleColor()
-    
-    ui.SameLine()
-    
-    ui.pushStyleColor(ui.StyleColor.Button, stopColor)
-    if ui.button("STOP / RESET", vec2(130, 0)) then ac.sendChatMessage("/chase_cmd STOP") end
-    ui.popStyleColor()
-    
-    ui.endWindow()
+        ui.endChild()
+
+        ui.separator()
+        
+        if ui.button("SET CONTESTANTS", vec2(-1, 0)) then
+            if CB_Admin.SelectedLeader ~= -1 and CB_Admin.SelectedChaser ~= -1 then
+                 ac.sendChatMessage("/chase_cmd SET_ROLES " .. CB_Admin.SelectedLeader .. "," .. CB_Admin.SelectedChaser)
+            else
+                 ac.log("Please select both Leader and Chaser.")
+            end
+        end
+        
+        ui.separator()
+        
+        local startColor = rgbm(0,1,0,0.5)
+        local stopColor = rgbm(1,0,0,0.5)
+        
+        ui.pushStyleColor(ui.StyleColor.Button, startColor)
+        if ui.button("START BATTLE", vec2(130, 0)) then ac.sendChatMessage("/chase_cmd START") end
+        ui.popStyleColor()
+        
+        ui.SameLine()
+        
+        ui.pushStyleColor(ui.StyleColor.Button, stopColor)
+        if ui.button("STOP / RESET", vec2(130, 0)) then ac.sendChatMessage("/chase_cmd STOP") end
+        ui.popStyleColor()
+    end)
 end
 
 ------------------------------------------------------------------------
