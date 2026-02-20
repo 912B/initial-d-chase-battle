@@ -200,9 +200,6 @@ function CB_Admin.RefreshDrivers()
             table.insert(CB_Admin.Drivers, { id = i, name = ac.getDriverName(i) })
         end
     end
-    -- User requested to simulate a driver. Add a fake one using our own ID so it works with C#
-    local myId = ac.getSim().focusedCar
-    table.insert(CB_Admin.Drivers, { id = myId, name = "[Mock] Virtual Rival" })
 end
 
 ------------------------------------------------------------------------
