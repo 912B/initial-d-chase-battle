@@ -259,7 +259,7 @@ function CB_Visuals.DrawHUD()
 
     -- 2. State & Role (Top Left)
     -- Only show if involved or spec
-    if CB_Battle.Role ~= "NONE" then
+    if CB_Battle.Role and CB_Battle.Role ~= "NONE" then
         ui.beginTransparentWindow("HubOverlay", vec2(100, 50), vec2(400, 100))
         ui.text("Role: " .. CB_Battle.Role)
         ui.text("State: " .. CB_Battle.GetStateName())
