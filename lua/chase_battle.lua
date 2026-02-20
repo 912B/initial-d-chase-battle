@@ -107,7 +107,8 @@ function CB_Admin.SetAuth(isAdmin)
 end
 
 function CB_Admin.Update(dt)
-    if not CB_Admin.IsAdmin then return end
+    local sim = ac.getSim()
+    if not CB_Admin.IsAdmin and not sim.isAdmin then return end
     
     -- Auto Refresh Drivers every 5s
     CB_Admin.RefreshTimer = CB_Admin.RefreshTimer + dt
@@ -118,9 +119,21 @@ function CB_Admin.Update(dt)
 end
 
 function script.windowMain(dt)
-    if not CB_Admin.IsAdmin then return end
+    local sim = ac.getSim()
+    
+    -- Allow AC native admin or Server admin
+    local isAuthorized = CB_Admin.IsAdmin or sim.isAdmin
 
     ui.beginOutline()
+    
+    if not isAuthorized then
+        ui.text("You are not currently authorized as Admin.")
+        if ui.button("Check Admin Privileges") then
+            ac.checkAdminPrivileges()
+        end
+        ui.endOutline(rgbm.colors.black)
+        return
+    end
     
     ui.text("Status: " .. CB_Battle.GetStateName())
     ui.SameLine()
