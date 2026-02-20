@@ -1,780 +1,502 @@
--- Chase Battle Client Script
--- Implements HUD, Spline Distance Calculation, Win Condition Logic and Leaderboard Challenge
--- Styled for Initial D aesthetics
+-- Chase Battle Plugin Client Script (v2.0)
+-- Modular Architecture
 
-local carLeader = nil
-local carChaser = nil
-local role = "SPECTATOR" -- "LEADER", "CHASER", "SPECTATOR"
-local battleActive = false
-local battleOpponentName = ""
+-- Modules
+local CB_Config = {}
+local CB_Utils = {}
+local CB_Admin = {}
+local CB_Spectator = {}
+local CB_Battle = {}
+local CB_Visuals = {}
+local CB_Network = {}
 
--- UI State
-local isWaitingForServer = false -- Prevent double clicking VS button
-local startLapLeader = 0
-local startLapChaser = 0
+-- Global State
+local car = ac.getCar(0)
+local sessionTime = 0
 
--- Config
-local WIN_DISTANCE_M = 150
-local CLAIM_DISTANCE_M = 10
+------------------------------------------------------------------------
+-- CB_Config: Configuration & Coordinate Parsing
+------------------------------------------------------------------------
+function CB_Config.Init()
+    CB_Config.FinishPos = vec3(0,0,0)
+    CB_Config.FinishFwd = vec3(0,0,1)
+    CB_Config.ChasePos = vec3(0,0,0)
+    CB_Config.ChaseFwd = vec3(0,0,1)
+    
+    -- Visual Lines (Calculated by Server)
+    CB_Config.FinishLineA = vec3(0,0,0)
+    CB_Config.FinishLineB = vec3(0,0,0)
+    CB_Config.ChaseLineA = vec3(0,0,0)
+    CB_Config.ChaseLineB = vec3(0,0,0)
 
--- Input Locking Logic
-local inputLocked = false
--- Countdown Logic
-local countdownActive = false
-local countdownTimer = 0
-local countdownFreezePos = nil
-local countdownFreezeLook = nil
-local countdownFreezeUp = nil
+    -- Load from Server Config
+    -- Note: We expect these to be injected as global strings by C# plugin
+    if ConfigFinishPos then CB_Config.FinishPos = CB_Config.ParseVec3(ConfigFinishPos) end
+    if ConfigFinishFwd then CB_Config.FinishFwd = CB_Config.ParseVec3(ConfigFinishFwd) end
+    if ConfigChasePos then CB_Config.ChasePos = CB_Config.ParseVec3(ConfigChasePos) end
+    if ConfigChaseFwd then CB_Config.ChaseFwd = CB_Config.ParseVec3(ConfigChaseFwd) end
 
--- prevMouseDown handled inside drawLeaderboard logic via simple state if needed, or global.
-local prevMouseDown = false
-local lastClickDebug = "None"
-
--- Colors (Initial D Style)
-local colYellow = rgbm(1, 1, 0, 1)      -- Main Text
-local colBlackBG = rgbm(0, 0, 0, 0.7)   -- Background
-local colRed = rgbm(1, 0, 0, 1)         -- Highlight/Battle
-local colWhite = rgbm(1, 1, 1, 1)       -- Standard Text
-local colGreen = rgbm(0, 1, 0, 1)       -- GO signal
-
--- Chat Message Handling Logic (Separated for Simulation)
--- Defined early so it can be called by UI functions
-local function handleChaseMessage(message, author)
-    -- Error Handling: Reset waiting state if server rejects request
-    if message:find("Invalid target ID") or 
-       message:find("Cannot chase AI") or 
-       message:find("Target is not connected") or 
-       message:find("You cannot chase yourself") or 
-       message:find("Could not start chase") then
-        
-        isWaitingForServer = false
-        ui.toast(ui.Icons.Warning, "Chase Request Failed")
-        ac.log("Chase Request Rejected: " .. message)
-        return
-    end
-
-    if message:find("CHASE_START:") then
-        ac.log("Received CHASE_START raw: " .. message)
-        -- Identify IDs
-        local l_id, c_id = message:match("CHASE_START:%s*(%d+)%s*vs%s*(%d+)")
-        
-        if l_id and c_id then
-            local leaderId = tonumber(l_id)
-            local chaserId = tonumber(c_id)
-            local myId = ac.getSim().focusedCar
-            
-            ac.log("CHASE_START Signal: " .. leaderId .. " vs " .. chaserId .. ". Me=" .. tostring(myId))
-            
-            -- Resolve cars by Server Slot
-            local leaderCarObj = ac.getCar.serverSlot(leaderId)
-            local chaserCarObj = ac.getCar.serverSlot(chaserId)
-
-            -- Fallback for Offline/Simulation if ServerSlot returns nil
-            if not leaderCarObj and (leaderId == 0 or leaderId == 999) then leaderCarObj = ac.getCar(0) end
-            if not chaserCarObj and (chaserId == 0 or chaserId == 999) then chaserCarObj = ac.getCar(0) end
-
-            if leaderCarObj and chaserCarObj then
-                ac.log("Resolved Cars: L="..tostring(leaderCarObj.index) .. " C="..tostring(chaserCarObj.index).. " Me="..tostring(myId))
-                
-                if tonumber(myId) == tonumber(leaderCarObj.index) then
-                    carLeader = leaderCarObj
-                    carChaser = chaserCarObj
-                    role = "LEADER"
-                    battleActive = true
-                    local dName = carChaser.driverName
-                    if type(dName) == "function" then dName = dName(carChaser) end
-                    battleOpponentName = dName
-                    ac.log("Battle Started: You are LEADER. Teleporting to Grid 1...")
-                    ui.toast(ui.Icons.Confirm, "BATTLE START! (Leader)")
-                    battleOpponentName = dName
-                    ac.log("Battle Started: You are LEADER. Teleporting to Grid 1...")
-                    ui.toast(ui.Icons.Confirm, "BATTLE START! (Leader)")
-                    isWaitingForServer = false -- Reset waiting state
-                    teleportToGrid(1)
-                elseif tonumber(myId) == tonumber(chaserCarObj.index) then
-                    carLeader = leaderCarObj
-                    carChaser = chaserCarObj
-                    role = "CHASER"
-                    battleActive = true
-                    local dName = carLeader.driverName
-                    if type(dName) == "function" then dName = dName(carLeader) end
-                    battleOpponentName = dName
-                     ac.log("Battle Started: You are CHASER. Teleporting to Grid 0...")
-                     ui.toast(ui.Icons.Confirm, "BATTLE START! (Chaser)")
-                     ac.log("Battle Started: You are CHASER. Teleporting to Grid 0...")
-                     ui.toast(ui.Icons.Confirm, "BATTLE START! (Chaser)")
-                     isWaitingForServer = false -- Reset waiting state
-                     teleportToGrid(0)
-                else
-                    ac.log("Chase Msg received but not involved (Me="..tostring(myId)..")")
-                end
-            else
-                 local errMsg = "Error resolving cars: L=" .. tostring(leaderCarObj) .. " C=" .. tostring(chaserCarObj)
-                 ac.log(errMsg)
-            end
-        else
-            ac.log("Failed to parse IDs from CHASE_START: " .. message)
-        end
-    end
-    -- CHASE_END logic would go here if needed
+    if ConfigFinishLineA then CB_Config.FinishLineA = CB_Config.ParseVec3(ConfigFinishLineA) end
+    if ConfigFinishLineB then CB_Config.FinishLineB = CB_Config.ParseVec3(ConfigFinishLineB) end
+    if ConfigChaseLineA then CB_Config.ChaseLineA = CB_Config.ParseVec3(ConfigChaseLineA) end
+    if ConfigChaseLineB then CB_Config.ChaseLineB = CB_Config.ParseVec3(ConfigChaseLineB) end
 end
 
-function script.update(dt)
-    if not _logTestDone then
-        ac.log("LUA_LOG_TEST: Script update loop is running.")
-        _logTestDone = true
+function CB_Config.ParseVec3(str)
+    -- Expects "vec3(x, y, z)" format from C#
+    local x, y, z = str:match("vec3%(([^,]+), ([^,]+), ([^,]+)%)")
+    if x and y and z then
+        return vec3(tonumber(x), tonumber(y), tonumber(z))
     end
+    return vec3(0,0,0)
+end
 
-    -- Countdown & Input Lock (Freeze Method)
-    if countdownActive then
-        countdownTimer = countdownTimer - dt
-        -- Force car to stay at spawn position
-        if countdownTimer > 0 and countdownFreezePos and countdownFreezeLook and countdownFreezeUp then
-             local car = ac.getCar(ac.getSim().focusedCar)
-             if car and physics and physics.setCarPosition then
-                 physics.setCarPosition(car.index, countdownFreezePos, countdownFreezeLook, countdownFreezeUp)
-                 if physics.setCarVelocity then
-                     physics.setCarVelocity(car.index, vec3(0,0,0))
-                 end
-             end
-        elseif countdownTimer < -2 then
-             -- End countdown state after "GO" has shown for 2 seconds
-             countdownActive = false
-             countdownFreezePos = nil -- formatting cleanup
+------------------------------------------------------------------------
+-- CB_Utils: Helper Functions
+------------------------------------------------------------------------
+function CB_Utils.CheckPlaneCrossing(prevPos, currPos, planePos, planeFwd)
+    -- Plane defined by Point(planePos) and Normal(planeFwd - planePos)
+    local normal = (planeFwd - planePos):normalize()
+    
+    local distPrev = (prevPos - planePos):dot(normal)
+    local distCurr = (currPos - planePos):dot(normal)
+
+    -- Crossed if sign changed from negative (before) to positive (after)
+    -- Assuming "Forward" points INTO the finish zone
+    return distPrev < 0 and distCurr >= 0
+end
+
+------------------------------------------------------------------------
+-- CB_Network: Protocol Handler
+------------------------------------------------------------------------
+function CB_Network.Init()
+    -- Hook into ac.onChatMessage because we send as ChatMessages
+    -- Format: CHASE_BATTLE:<OPCODE>:<PAYLOAD>
+end
+
+function CB_Network.ProcessMessage(msg)
+    if not msg:find("^CHASE_BATTLE:") then return end
+    
+    local parts = {}
+    for part in msg:gmatch("[^:]+") do table.insert(parts, part) end
+    
+    local opcode = parts[2]
+    local payload = parts[3] or ""
+
+    if opcode == "AUTH" then CB_Admin.SetAuth(payload == "TRUE")
+    elseif opcode == "STATE" then CB_Battle.SetState(tonumber(payload))
+    elseif opcode == "SETUP" then CB_Battle.SetContestants(payload)
+    elseif opcode == "START" then CB_Battle.OnStart(payload)
+    elseif opcode == "GO" then CB_Battle.OnGo()
+    elseif opcode == "RESULT" then CB_Battle.OnResult(payload)
+    end
+end
+
+------------------------------------------------------------------------
+-- CB_Admin: Admin Panel
+------------------------------------------------------------------------
+CB_Admin.IsAdmin = false
+CB_Admin.Drivers = { }
+CB_Admin.SelectedLeader = -1
+CB_Admin.SelectedChaser = -1
+CB_Admin.RefreshTimer = 0
+
+function CB_Admin.SetAuth(isAdmin)
+    CB_Admin.IsAdmin = isAdmin
+    if isAdmin then ac.log("ChaseBattle: Admin Access Granted") end
+end
+
+function CB_Admin.Update(dt)
+    if not CB_Admin.IsAdmin then return end
+    
+    -- Auto Refresh Drivers every 5s
+    CB_Admin.RefreshTimer = CB_Admin.RefreshTimer + dt
+    if CB_Admin.RefreshTimer > 5 then
+        CB_Admin.RefreshDrivers()
+        CB_Admin.RefreshTimer = 0
+    end
+end
+
+function script.windowAdmin(dt)
+    if not CB_Admin.IsAdmin then return end
+
+    ui.beginOutline()
+    
+    ui.text("Status: " .. CB_Battle.GetStateName())
+    ui.SameLine()
+    if ui.button("Force Refresh") then CB_Admin.RefreshDrivers() end
+    
+    ui.separator()
+    
+    -- Selection UI
+    ui.text("LEADER: " .. (ac.getDriverName(CB_Admin.SelectedLeader) or "None"))
+    ui.text("CHASER: " .. (ac.getDriverName(CB_Admin.SelectedChaser) or "None"))
+    
+    ui.separator()
+    ui.text("Player List:")
+    
+    ui.beginChild("PlayerList", vec2(0, 150), true)
+    for _, driver in ipairs(CB_Admin.Drivers) do
+         ui.pushID(driver.id)
+         if ui.button("L") then CB_Admin.SelectedLeader = driver.id end
+         ui.SameLine()
+         if ui.button("C") then CB_Admin.SelectedChaser = driver.id end
+         ui.SameLine()
+         
+         local color = rgbm(1,1,1,1)
+         if driver.id == CB_Admin.SelectedLeader then color = rgbm(0,1,0,1) end
+         if driver.id == CB_Admin.SelectedChaser then color = rgbm(1,0,0,1) end
+         ui.textColored(driver.name .. " ("..driver.id..")", color)
+         
+         ui.popID()
+    end
+    ui.endChild()
+
+    ui.separator()
+    
+    if ui.button("SET CONTESTANTS", vec2(-1, 0)) then
+        if CB_Admin.SelectedLeader ~= -1 and CB_Admin.SelectedChaser ~= -1 then
+             ac.sendChatMessage("/chase_cmd SET_ROLES " .. CB_Admin.SelectedLeader .. "," .. CB_Admin.SelectedChaser)
+        else
+             ac.log("Please select both Leader and Chaser.")
         end
     end
+    
+    ui.separator()
+    
+    local startColor = rgbm(0,1,0,0.5)
+    local stopColor = rgbm(1,0,0,0.5)
+    
+    ui.pushStyleColor(ui.StyleColor.Button, startColor)
+    if ui.button("START BATTLE", vec2(130, 0)) then ac.sendChatMessage("/chase_cmd START") end
+    ui.popStyleColor()
+    
+    ui.SameLine()
+    
+    ui.pushStyleColor(ui.StyleColor.Button, stopColor)
+    if ui.button("STOP / RESET", vec2(130, 0)) then ac.sendChatMessage("/chase_cmd STOP") end
+    ui.popStyleColor()
 
-    -- 1. Check for "Back to Pits" (Instant Loss)
-    local car = ac.getCar(ac.getSim().focusedCar)
-    if car.isInPitlane then
-         ac.sendChatMessage("/chasereport GIVEUP")
-         ui.toast(ui.Icons.Warning, "Returned to Pits - Battle Forfeited")
-         -- Local reset will happen via CHASE_END broadcast
+    ui.endOutline(rgbm.colors.black)
+end
+
+function CB_Admin.RefreshDrivers()
+    CB_Admin.Drivers = {}
+    for i = 0, ac.getSim().carsCount - 1 do
+        local c = ac.getCar(i)
+        if c and c.isConnected then
+            table.insert(CB_Admin.Drivers, { id = i, name = ac.getDriverName(i) })
+        end
+    end
+end
+
+------------------------------------------------------------------------
+-- CB_Spectator: Input Locking
+------------------------------------------------------------------------
+CB_Spectator.IsSpectating = false
+CB_Spectator.TeleportTimer = 0
+
+function CB_Spectator.Update(dt)
+    if not CB_Spectator.IsSpectating then return end
+    
+    -- Only active during battle states (Countdown/Active)
+    -- If Idle, spectators can roam? Spec implies "Not Contestant".
+    -- If server sends SETUP, we are SPEC.
+    -- We should only lock when State > 0.
+    if CB_Battle.State == 0 then return end
+
+    -- Lock Inputs
+    ac.setDisplayMessage("Spectator Mode", "Battle in Progress - Controls Locked")
+    
+    -- Physics Lock
+    ac.ext.physicsSetGas(0)
+    ac.ext.physicsSetBrake(1)
+    ac.ext.physicsSetClutch(1)
+    ac.ext.physicsSetGear(0)
+    ac.ext.physicsSetSteer(0)
+    
+    -- Force Pit Return logic (Optional: if user drives out, port back)
+    -- For now, just Lock is sufficient as they can't drive.
+    -- But if they were on track when battle started, they are stuck on track.
+    -- Server should teleport them or we do it here.
+    -- C# ChaseManager doesn't teleport spectators effectively (can't target easily).
+    -- So Lua does it.
+    
+    -- If car is not in pitbox (velocity > 1 or distance from pit > 5m?), Teleport.
+    -- Simplify: Just force camera to different view?
+    -- Let's attempt to use ac.ext.teleportTo(pit) if possible.
+    -- Or just rely on input lock. 
+    -- User requirement: "传送回pit 并锁定油门".
+    
+    if CB_Spectator.TeleportTimer < 1.0 then -- Try teleport once at start of mode
+        ac.sendChatMessage("/box") -- Server command to teleport to pit? 
+        -- Or CSP:
+        -- ac.ext.physicsSetCarPosition(...) to pit spawn?
+        -- We don't know pit spawn easily.
+        -- "/box" or "/pits" chat command is standard for some servers.
+        -- AssettoServer might handle "/teleport_pit"?
+        -- Let's assume Input Lock is the primary mechanism and the user accepts "stuck where they are" if teleport fails, 
+        -- OR we rely on a standard AC function if available. 
+        -- `ac.returnToPit()` exists in some CSP versions? 
+        -- Let's try `ac.sendChatMessage("/mid-race-spectate")` if server supports it.
+        
+        -- Fallback: Just lock.
+        CB_Spectator.TeleportTimer = CB_Spectator.TeleportTimer + dt
+    end
+end
+
+------------------------------------------------------------------------
+-- CB_Battle: Core Logic
+------------------------------------------------------------------------
+CB_Battle.State = 0 -- 0:Idle, 1:Countdown, 2:Active, 3:Finished
+CB_Battle.Role = "NONE" -- LEAD, CHASE, SPEC
+CB_Battle.LeaderID = -1
+CB_Battle.ChaserID = -1
+
+-- State Tracking
+CB_Battle.LastPosLeader = vec3(0,0,0)
+CB_Battle.LastPosChaser = vec3(0,0,0)
+CB_Battle.ChaserCrossedLine = false
+
+function CB_Battle.SetState(s) 
+    CB_Battle.State = s 
+    if s == 0 then
+        CB_Battle.ChaserCrossedLine = false
+    end
+end
+
+function CB_Battle.GetStateName() 
+    local names = { [0]="Idle", [1]="Countdown", [2]="Active", [3]="Finished" }
+    return names[CB_Battle.State] or "Unknown"
+end
+
+function CB_Battle.SetContestants(payload)
+    local lId, cId = payload:match("([^,]+),([^,]+)")
+    CB_Battle.LeaderID = tonumber(lId)
+    CB_Battle.ChaserID = tonumber(cId)
+    
+    local myId = car.index
+    if myId == CB_Battle.LeaderID then CB_Battle.Role = "LEAD"
+    elseif myId == CB_Battle.ChaserID then CB_Battle.Role = "CHASE"
+    else CB_Battle.Role = "SPEC" end
+    
+    CB_Spectator.IsSpectating = (CB_Battle.Role == "SPEC")
+    
+    -- Log Role for Debug
+    if CB_Battle.Role ~= "SPEC" then
+        ac.log("Chase Battle Role Assigned: " .. CB_Battle.Role)
+    end
+end
+
+function CB_Battle.OnStart(gridIndex)
+    -- Teleport logic
+    -- Grid 0: Leader, Grid 1: Chaser
+    -- Or reverse depending on track config? usually Leader in front.
+    local myGrid = -1
+    if CB_Battle.Role == "LEAD" then myGrid = 0
+    elseif CB_Battle.Role == "CHASE" then myGrid = 1 end
+    
+    if myGrid ~= -1 then
+        -- Use CSP teleport if available, or reset to pit then move?
+        -- physics.teleportTo is not standard Lua API but standard Assetto usually allows "restart".
+        -- Server probably handles the restart logic or we need to teleport manually.
+        -- Assuming "START" signal implies we should be at start.
+        -- Since we can't easily teleport in standard Lua without CSP extension `physics.setCarPosition`, we rely on that.
+        -- If `ac.ext` is available:
+        if ac.ext and ac.ext.physicsSetCarPosition then
+             -- We need spawn positions. 
+             -- Valid approach: ac.getSpawnPosition(gridIndex)
+             -- Need to verify API. ac.getSpawnPoint(index) exists!
+             local spawn = ac.getSpawnPoint(myGrid)
+             ac.ext.physicsSetCarPosition(car.index, spawn.position, spawn.look, spawn.up)
+             ac.ext.physicsSetVelocity(car.index, vec3(0,0,0), vec3(0,0,0))
+        end
+    end
+    
+    -- Lock Input
+    CB_Battle.InputLocked = true
+end
+
+function CB_Battle.OnGo()
+    CB_Battle.InputLocked = false
+    ac.sendChatMessage("GO! GO! GO!")
+end
+
+function CB_Battle.OnResult(payload)
+    local winner, reason = payload:match("([^,]+),([^,]+)")
+    ac.log("Battle Result: " .. (winner or "") .. " Reason: " .. (reason or ""))
+    -- Show UI notification (Big Text)
+    CB_Visuals.ShowResult(winner, reason)
+end
+
+function CB_Battle.Update(dt)
+    -- Input Lock Handling for Contestants
+    if CB_Battle.InputLocked then
+        ac.ext.physicsSetGas(0)
+        ac.ext.physicsSetBrake(1)
+        ac.ext.physicsSetClutch(1)
+        ac.ext.physicsSetGear(0)
+        return -- Skip logic if locked
+    end
+
+    if CB_Battle.State ~= 2 then return end -- Only Active
+    
+    -- We need positions of BOTH cars.
+    -- In Client Lua, getting opponent position requires `ac.getCar(id)`
+    local leaderCar = ac.getCar(CB_Battle.LeaderID)
+    local chaserCar = ac.getCar(CB_Battle.ChaserID)
+    
+    if not leaderCar or not chaserCar then return end
+    
+    -- We assume `script.update` calls this, so `car` global is MY car.
+    -- Logic runs on both clients independently? 
+    -- Ideally logic runs on Leader or Chaser or Both and reports.
+    -- To avoid double reporting, usually Leader reports win/loss, or both do.
+    -- Server handles deduplication.
+    
+    -- Let's run logic on EVERYONE involved (Leader/Chaser)
+    if CB_Battle.Role == "SPEC" then return end
+
+    local lPos = leaderCar.position
+    local cPos = chaserCar.position
+    
+    -- 0. Update Last Pos (Initial)
+    if CB_Battle.LastPosLeader == vec3(0,0,0) then CB_Battle.LastPosLeader = lPos end
+    if CB_Battle.LastPosChaser == vec3(0,0,0) then CB_Battle.LastPosChaser = cPos end
+
+    -- 1. Check Overtake (Chaser Wins if ahead of Leader by > 5m? No, just ahead)
+    -- "Distance < -5m (Chaser in front)"
+    -- We calculate Spline Dist
+    local lSpline = leaderCar.splinePosition
+    local cSpline = chaserCar.splinePosition
+    
+    -- Correct Spline wrapping if needed (Track loop)
+    if lSpline < 0.1 and cSpline > 0.9 then lSpline = lSpline + 1 end
+    
+    local splineGap = (lSpline - cSpline) 
+    -- Approximate gap in meters (Need track length? ac.getTrackLength())
+    local trackLen = ac.getTrackLength()
+    local gapM = splineGap * trackLen
+    
+    if gapM < -5 then
+         -- Chaser is 5m ahead of Leader -> Chaser WIN
+         ac.sendChatMessage("/chasereport WIN") 
+         CB_Battle.State = 3 -- Prevent double report locally
          return
     end
-
-    if not battleActive then return end
-
-    if not carLeader or not carChaser then return end
-
-    -- 2. Calculate Distance (Spline Based)
-    local leaderSpline = carLeader.splinePosition
-    local chaserSpline = carChaser.splinePosition
     
-    local sim = ac.getSim()
-    local trackLength = sim.trackLengthM or 5000
-
-
-    -- Simple distance for point-to-point/Touge
-    -- If loop track support is needed, checking (0.9 vs 0.1) wrap-around is required
-    local distance = (leaderSpline - chaserSpline) * trackLength
-    
-    -- DEBUG: Log Distance
-    if not distanceDebugTimer then distanceDebugTimer = 0 end
-    distanceDebugTimer = distanceDebugTimer + dt
-    if distanceDebugTimer > 1.0 then
-        ac.log(string.format("RACE DEBUG: Dist=%.2f LeaderSpline=%.4f ChaserSpline=%.4f TrackLen=%.0f", distance, leaderSpline, chaserSpline, trackLength))
-        distanceDebugTimer = 0
+    -- 2. Check Chase Line Crossing (Chaser)
+    local chaserCrossed = CB_Utils.CheckPlaneCrossing(CB_Battle.LastPosChaser, cPos, CB_Config.ChasePos, CB_Config.ChaseFwd)
+    if chaserCrossed then
+        CB_Battle.ChaserCrossedLine = true
+        ac.log("Chaser Crossed Chase Line!")
     end
 
-    -- 3. Check End Conditions
-    -- Avoid instant finish if cars are spawned at strange locations (sanity check distance < trackLength/2)
-    if math.abs(distance) < trackLength / 2 then
-        if distance > WIN_DISTANCE_M then
-            -- Leader escaped
-            ac.sendChatMessage("/chasereport LOSS") -- Leader Escaped = Chaser Loss
-            -- Local reset handled by CHASE_END broadcast
-        elseif distance < -5 then -- Chaser is ahead (Overtake) 
-             -- Chaser Overtook
-            ac.sendChatMessage("/chasereport WIN") -- Chaser Overtook = Chaser Win
-            -- Local reset handled by CHASE_END broadcast
-        elseif (carLeader.lapCount > startLapLeader) or (carChaser.lapCount > startLapChaser) or (leaderSpline > 0.99) or (chaserSpline > 0.99) then
-             -- Reached Finish Line (Lap or Spline) -> DRAW
-            ac.sendChatMessage("/chasereport DRAW")
+    -- 3. Check Finish Line Crossing (Leader)
+    local leaderFinished = CB_Utils.CheckPlaneCrossing(CB_Battle.LastPosLeader, lPos, CB_Config.FinishPos, CB_Config.FinishFwd)
+    
+    if leaderFinished then
+        ac.log("Leader Finished!")
+        -- Leader reached finish. Check Chaser status.
+        if CB_Battle.ChaserCrossedLine then
+             -- Chaser already crossed Chase Line -> DRAW
+             ac.sendChatMessage("/chasereport DRAW")
+        else
+             -- Chaser NOT crossed Chase Line -> Leader Wins (Escape)
+             ac.sendChatMessage("/chasereport LOSS") 
         end
+        CB_Battle.State = 3
+    end
+
+    -- Update Last Pos
+    CB_Battle.LastPosLeader = lPos
+    CB_Battle.LastPosChaser = cPos
+end
+
+------------------------------------------------------------------------
+-- Main Loop hooks (Called from footer)
+------------------------------------------------------------------------
+
+function script.update(dt)
+    CB_Config.Update() -- Check if config reload needed (optional)
+    
+    CB_Admin.Update(dt)
+    CB_Spectator.Update(dt)
+    CB_Battle.Update(dt)
+    
+    -- Visuals
+    CB_Visuals.DrawD3()
+    CB_Visuals.DrawHUD()
+end
+
+function CB_Config.Update()
+    -- Optional: Hot reload checks if needed
+end
+
+------------------------------------------------------------------------
+-- CB_Visuals: Rendering
+------------------------------------------------------------------------
+CB_Visuals.ResultText = ""
+CB_Visuals.ResultTimer = 0
+
+function CB_Visuals.ShowResult(winner, reason)
+    local w = winner == "Leader" and "LEADER ESCAPED!" or "CHASER WINS!"
+    if winner == "DRAW" then w = "DRAW!" end
+    
+    CB_Visuals.ResultText = w .. "\n" .. (reason or "")
+    CB_Visuals.ResultTimer = 5
+end
+
+function CB_Visuals.DrawD3()
+    -- Draw Finish Line (Green)
+    if CB_Config.FinishLineA and CB_Config.FinishLineB then
+         render.debugLine(CB_Config.FinishLineA, CB_Config.FinishLineB, rgbm(0,1,0,1))
+    end
+    
+    -- Draw Chase Line (Red)
+    if CB_Config.ChaseLineA and CB_Config.ChaseLineB then
+         render.debugLine(CB_Config.ChaseLineA, CB_Config.ChaseLineB, rgbm(1,0,0,1))
     end
 end
 
-function script.drawUI()
-    local uiState = ac.getUiState()
-    
-    -- 1. Draw Battle HUD (if active)
-    if battleActive and carLeader and carChaser then
-        drawBattleHUD(uiState)
-    elseif battleActive then
-        -- Debug: Why is HUD not drawing if battle is active?
-        -- Rate limit logs
-        if math.random() < 0.01 then 
-            ac.log("UI_DEBUG: Battle Active but Cars Nil? Leader="..tostring(carLeader).." Chaser="..tostring(carChaser)) 
-        end
-    end
-
-    -- 2. Draw Leaderboard (Always visible or toggleable? Keeping always visible for now)
-    drawLeaderboard(uiState)
-
-    -- Temporary Teleport Test
-    ui.transparentWindow("Teleport Test", vec2(600, 100), vec2(150, 100), true, true, function()
-        if ui.button("Test TP Grid 0") then
-            teleportToGrid(0)
-        end
-        if ui.button("Test TP Grid 1") then
-            teleportToGrid(1)
-        end
-    end)
-
-    -- 3. Draw Countdown Overlay
-    if countdownActive then
-        drawCountdown(uiState)
-    end
-    if countdownActive then
-        drawCountdown(uiState)
-    end
-end
-
--- Fallback Draw Listener
-if ac.onDrawUI then
-    ac.onDrawUI(script.drawUI)
-end
-
-function drawCountdown(uiState)
-    local timer = math.ceil(countdownTimer)
-    local text = ""
-    local color = colRed
-
-    if timer > 0 then
-        text = tostring(timer)
-    else
-        text = "GO!"
-        color = colGreen
-    end
-
-    -- Center Text
-    ui.pushFont(ui.Font.Huge)
-    local textSize = ui.measureText(text)
-    local pos = (uiState.windowSize - textSize) / 2
-    -- Adjust for upper center
-    pos.y = uiState.windowSize.y * 0.3 
-
-    ui.setCursor(pos)
-    ui.pushStyleColor(ui.StyleColor.Text, color)
-    ui.text(text)
-    ui.popStyleColor()
-    ui.popFont()
-end
-
-function drawBattleHUD(uiState)
-    -- Design Constants
-    local screenWidth = uiState.windowSize.x
-    local screenHeight = uiState.windowSize.y
-    local barWidth = 600
-    local barHeight = 20
-    local topMargin = 50
-    
-    local roleColor = colWhite
-    local roleText = role
-    
-    if role == "LEADER" then 
-        roleColor = colYellow
-        roleText = "DOWNHILL SPECIALIST (LEADER)"
-    elseif role == "CHASER" then
-        roleColor = colRed
-        roleText = "CHALLENGER (CHASER)"
-    end
-    
-    -- 1. Role & Opponent Info (Top Center)
-    ui.pushFont(ui.Font.Title)
-    local roleSize = ui.measureText(roleText)
-    ui.setCursor(vec2((screenWidth - roleSize.x) / 2, topMargin))
-    ui.pushStyleColor(ui.StyleColor.Text, roleColor)
-    ui.text(roleText)
-    ui.popStyleColor()
-    ui.popFont()
-    
-    ui.pushFont(ui.Font.Main)
-    local vsText = "VS  " .. battleOpponentName
-    local vsSize = ui.measureText(vsText)
-    ui.setCursor(vec2((screenWidth - vsSize.x) / 2, topMargin + 30))
-    ui.text(vsText)
-    ui.popFont()
-
-    -- 2. Distance Bar (C.A. Meter Style)
-    -- Calculate Distance for UI
-    local leaderSpline = carLeader.splinePosition
-    local chaserSpline = carChaser.splinePosition
-    local sim = ac.getSim()
-    local trackLength = sim.trackLengthM or 5000
-    -- Simple distance (Touge/Linear)
-    local distance = (leaderSpline - chaserSpline) * trackLength
-    
-    -- Draw The Bar
-    local barY = topMargin + 70
-    local barX = (screenWidth - barWidth) / 2
-    
-    -- Background
-    ui.drawRectFilled(vec2(barX, barY), vec2(barX + barWidth, barY + barHeight), colBlackBG, 0)
-    
-    -- Center Marker (0m / Overtake)
-    local centerX = barX + (barWidth / 2) -- Keep 0 at center? Or 0 at left?
-    -- Initial D Arcade usually has "Gap" bar. Let's do: 
-    -- Left = Chaser Ahead (Negative Dist), Right = Leader Ahead (Positive Dist)
-    -- Range: -50m to +150m (Win)
-    
-    local maxDist = WIN_DISTANCE_M -- 150m
-    local range = maxDist + 50 -- Total range 200m (-50 to 150)
-    -- Map distance to X. 
-    -- 0m should be at some point. Let's say 25% is 0 (since chaser rarely gets far ahead without winning)
-    -- Actually, simpler: 0 is Left edge, 150 is Right edge. If <0, it clamps to left. 
-    -- But we want to show overtake danger. 
-    -- Let's stick to standard: 0m = Left (Danger), 150m = Right (Safe for Leader)
-    
-    local progress = math.clamp(distance / maxDist, 0, 1) 
-    
-    -- Bar Color Logic
-    local barCol = colYellow
-    if distance < 20 then barCol = colRed -- Danger Zone / Close Battle
-    elseif distance > 100 then barCol = colGreen -- Safe Zone
-    end
-    
-    -- Fill
-    ui.drawRectFilled(vec2(barX, barY), vec2(barX + (barWidth * progress), barY + barHeight), barCol, 0)
-    
-    -- Markers
-    ui.drawLine(vec2(barX, barY - 5), vec2(barX, barY + barHeight + 5), colWhite, 2) -- 0m
-    ui.drawLine(vec2(barX + barWidth, barY - 5), vec2(barX + barWidth, barY + barHeight + 5), colWhite, 2) -- Max
-    
-    -- Text Labels
-    ui.pushFont(ui.Font.Main)
-    ui.setCursor(vec2(barX, barY + barHeight + 5))
-    ui.text("0m")
-    
-    ui.setCursor(vec2(barX + barWidth - 40, barY + barHeight + 5))
-    ui.text(tostring(maxDist).."m")
-    
-    -- Current Dist Text centered on Bar
-    local distText = string.format("%.1fm", distance)
-    local dSize = ui.measureText(distText)
-    ui.setCursor(vec2(barX + (barWidth * progress) - (dSize.x / 2), barY - 25))
-    ui.text(distText)
-    ui.popFont()
-end
-
-local leaderboardPos = vec2(50, 100)
-local isDragging = false
-
-function drawLeaderboard(uiState)
-    -- GT2 Style Leaderboard (Custom Draggable)
-    local width = 300
-    local rowHeight = 32
-    local headerHeight = 40
-    
-    -- Init Pos
-    if leaderboardPos.x == 50 and leaderboardPos.y == 100 and uiState.windowSize.x > 0 then
-         leaderboardPos = vec2(uiState.windowSize.x - width - 20, 100)
-    end
-    
-    -- Colors
-    local colPurple = rgbm(0.6, 0.0, 0.8, 1) -- Purple for header/badges
-    local colRowBg = rgbm(0, 0, 0, 0.6)  -- Dark semi-transparent background
-    local colText = rgbm(1, 1, 1, 1)
-    
-    -- Prepare Data
-    local sim = ac.getSim()
-    local displayCars = {}
-    for i = 0, sim.carsCount - 1 do
-        local c = ac.getCar.serverSlot(i)
-        if c and c.isConnected then 
-            -- Debug ID mapping: i is the Server Slot ID
-            local dName = c.driverName
-            if type(dName) == "function" then dName = dName(c) end
-            -- ac.log("Leaderboard: Slot=" .. i .. " Name=" .. tostring(dName))
-            -- Store both car and original server slot ID
-            table.insert(displayCars, { car = c, slot = i }) 
-        end
-    end
-    
-    -- MOCK DATA FOR TESTING (Remove or set false in production)
-    local TEST_MODE = false 
-    if TEST_MODE then
-        table.insert(displayCars, { index = 86, driverName = "Takumi Fujiwara", isConnected = true, splinePosition = 0.5 })
-        table.insert(displayCars, { index = 7,  driverName = "Keisuke Takahashi", isConnected = true, splinePosition = 0.4 })
-    end
-
-    local contentHeight = headerHeight + (#displayCars * rowHeight) + 10
-
-    -- Window Wrapper
-    -- ui.transparentWindow(id, pos, size, noPadding, inputs, content)
-    ui.transparentWindow("Leaderboard", leaderboardPos, vec2(width, contentHeight), true, true, function()
-        
-        -- Header Drag Logic (Global Coords Check, but updates global pos)
-        local startX = leaderboardPos.x
-        local startY = leaderboardPos.y
-        local mPos = uiState.mousePos
-        
-        -- Check collision with Header area (Global Screen Space)
-        if mPos and mPos.x >= startX and mPos.x <= (startX + width) and 
-           mPos.y >= startY and mPos.y <= (startY + headerHeight) then
-            ui.setTooltip("Hold to Move")
-            if ui.mouseDown(0) then
-                if ui.getMouseDelta then
-                    leaderboardPos = leaderboardPos + ui.getMouseDelta()
-                elseif uiState.mouseDelta then
-                     leaderboardPos = leaderboardPos + uiState.mouseDelta
-                end
-                -- Update local vars for this frame's drawing
-                startX = leaderboardPos.x
-                startY = leaderboardPos.y
-            end
-        end
-
-        -- Header Visuals (Global Coords for drawRectFilled)
-        ui.drawRectFilled(vec2(startX, startY), vec2(startX + width, startY + headerHeight), colPurple, 0)
-        
-        -- Header Text (Relative Cursor to Window)
-        -- Window content starts at 0,0 relative to window position.
-        
-        -- Note: We are using ui.drawRectFilled with GLOBAL coordinates (startX/Y) because that's how CSP drawing usually works
-        -- regardless of window context unless using window draw list.
-        -- But ui.text / ui.button use Layout coordinates (Relative).
-        
-        ui.setCursor(vec2(0, 5)) 
+function CB_Visuals.DrawHUD()
+    -- 1. Result Text (Big Center)
+    if CB_Visuals.ResultTimer > 0 then
+        CB_Visuals.ResultTimer = CB_Visuals.ResultTimer - 0.016 -- approx dt
         ui.pushFont(ui.Font.Title)
-        
-        local headerText = "TOUGE BATTLE"
-        local textSize = ui.measureText(headerText)
-        ui.setCursor(vec2((width - textSize.x) / 2, 8))
-        ui.text(headerText)
+        local screen = ui.windowSize()
+        -- Center text roughly
+        ui.setCursor(vec2(screen.x / 2 - 200, screen.y / 2 - 100))
+        ui.textColored(CB_Visuals.ResultText, rgbm(1,1,0,1))
         ui.popFont()
+    end
+
+    -- 2. State & Role (Top Left)
+    -- Only show if involved or spec
+    if CB_Battle.Role ~= "NONE" then
+        ui.beginTransparentWindow("HubOverlay", vec2(100, 50), vec2(400, 100))
+        ui.text("Role: " .. CB_Battle.Role)
+        ui.text("State: " .. CB_Battle.GetStateName())
         
-        -- List
-        local currentY_rel = headerHeight
-        local rank = 1
-        
-        ui.pushFont(ui.Font.Main)
-        
-        for _, item in ipairs(displayCars) do
-         local car = item.car
-         if car then
-                local currentY_abs = startY + currentY_rel
-                
-                -- Row BG (Absolute)
-                ui.drawRectFilled(vec2(startX, currentY_abs), vec2(startX + width, currentY_abs + rowHeight), colRowBg, 0)
-                
-                -- Rank
-                ui.setCursor(vec2(10, currentY_rel + 6))
-                ui.text(tostring(rank))
-                
-                -- Badge (Absolute Box)
-                local badgeSize = 24
-                local badgeX_abs = startX + 35
-                local badgeY_abs = currentY_abs + 4
-                ui.drawRectFilled(vec2(badgeX_abs, badgeY_abs), vec2(badgeX_abs + badgeSize, badgeY_abs + badgeSize), colPurple, 4)
-                
-                local numStr = tostring(car.index)
-                local numSize = ui.measureText(numStr)
-                ui.setCursor(vec2(35 + (badgeSize - numSize.x)/2, currentY_rel + 4 + (badgeSize - numSize.y)/2))
-                ui.text(numStr)
-                
-                -- Name
-                local dName = car.driverName
-                if type(dName) == "function" then dName = dName(car) end
-                dName = tostring(dName)
-                local nameSize = ui.measureText(dName)
-                ui.setCursor(vec2(70, currentY_rel + (rowHeight - nameSize.y)/2))
-                
-                local isMe = (tonumber(car.index) == tonumber(sim.focusedCar))
-                
-                if isMe then ui.pushStyleColor(ui.StyleColor.Text, colYellow) end
-                ui.text(dName)
-                if isMe then ui.popStyleColor() end
-                
-                -- Status / Button
-                local statusText = "-:--:---"
-                local statusCol = colText
-                local showButton = false
-                
-                if car.index == (carLeader and carLeader.index) or car.index == (carChaser and carChaser.index) then
-                     statusText = "BATTLE"
-                     statusCol = colRed
-                elseif battleActive and isMe then
-                     statusText = "BATTLE"
-                     statusCol = colRed
-                elseif isWaitingForServer and isMe then
-                     statusText = "WAIT..."
-                     statusCol = colYellow
-                elseif not battleActive then
-                     statusText = "FREE"
-                     statusCol = rgbm(0,1,0,1)
-                     if not isMe then showButton = true end
-                end
-                
-                if showButton then
-                    local btnWidth = 50
-                    local btnHeight = 22
-                    local btnX_rel = width - btnWidth - 5
-                    local btnY_rel = currentY_rel + (rowHeight - btnHeight)/2
-                    
-                    ui.setCursor(vec2(btnX_rel, btnY_rel))
-                    
-                    -- Button Style
-                    ui.pushStyleColor(ui.StyleColor.Button, rgbm(0.6, 0, 0, 1))
-                    ui.pushStyleColor(ui.StyleColor.ButtonHovered, rgbm(0.8, 0, 0, 1))
-                    ui.pushStyleColor(ui.StyleColor.ButtonActive, rgbm(1, 0, 0, 1))
-                    
-                    -- Use native ui.button
-                    if ui.button("VS##"..item.slot, vec2(btnWidth, btnHeight)) then
-                         if not isWaitingForServer then
-                             -- Action: Challenge
-                             isWaitingForServer = true
-                             local cmd = "/chase " .. item.slot
-                             ac.sendChatMessage(cmd)
-                             ui.toast(ui.Icons.Confirm, "Request Sent...")
-                             
-                             -- Timeout reset (failsafe)
-                             setTimeout(function() isWaitingForServer = false end, 5000)
-                         end
-                    end
-                    ui.popStyleColor(3)
-
-                else
-                    local timeSize = ui.measureText(statusText)
-                    ui.setCursor(vec2(width - timeSize.x - 10, currentY_rel + (rowHeight - timeSize.y)/2))
-                    ui.pushStyleColor(ui.StyleColor.Text, statusCol)
-                    ui.text(statusText)
-                    ui.popStyleColor()
-                end
-                
-                currentY_rel = currentY_rel + rowHeight
-                rank = rank + 1
+        -- Show Gap?
+        if CB_Battle.State == 2 then
+             local lCar = ac.getCar(CB_Battle.LeaderID)
+             local cCar = ac.getCar(CB_Battle.ChaserID)
+             if lCar and cCar then
+                 local dist = ac.getDistance(lCar.position, cCar.position)
+                 ui.text("Gap: " .. math.floor(dist) .. "m")
              end
         end
-        ui.popFont()
-    -- Debug Buttons at bottom
-    local btnY = headerHeight + (#displayCars * rowHeight) + 10
-    ui.setCursor(vec2(10, btnY))
-    if ui.button("TP Grid 0") then teleportToGrid(0) end
-    ui.sameLine()
-    if ui.button("TP Grid 1") then teleportToGrid(1) end
-
-    ui.transparentWindow("Teleport Test", vec2(600, 100), vec2(250, 140), true, true, function()
-        ui.text("Debug Window")
-        if ui.button("TP Grid 0") then teleportToGrid(0) end
-        ui.sameLine()
-        if ui.button("TP Grid 1") then teleportToGrid(1) end
-        
-        ui.newLine()
-        ui.text("Simulation Test")
-        if ui.button("Simulate: Be Leader") then
-             ui.toast(ui.Icons.Settings, "Simulating Leader...")
-             local mySimCar = ac.getCar(ac.getSim().focusedCar)
-             local mySlot = 0 -- Default to 0 for offline sim
-             for i, c in ac.iterateCars.serverSlots() do
-                 if c.index == mySimCar.index then mySlot = i break end
-             end
-             
-             local msg = string.format("CHASE_START: %d vs 999", mySlot)
-             handleChaseMessage(msg, "System")
-        end
-        
-        if ui.button("Simulate: Be Chaser") then
-             ui.toast(ui.Icons.Settings, "Simulating Chaser...")
-             local mySimCar = ac.getCar(ac.getSim().focusedCar)
-             local mySlot = 0 
-             for i, c in ac.iterateCars.serverSlots() do
-                 if c.index == mySimCar.index then mySlot = i break end
-             end
-             
-             local msg = string.format("CHASE_START: 999 vs %d", mySlot)
-             handleChaseMessage(msg, "System")
-        end
-    end)
-    
-    end)
-    
-    prevMouseDown = ui.mouseDown(0)
-end
-
--- Startup Toast
-local initToastShown = false
-if not initToastShown then
-    ui.toast(ui.Icons.Settings, "Chase Battle Script Loaded")
-    initToastShown = true
-end
-
--- Chat Message Handling Logic (Separated for Simulation)
-
-
--- Bind to script event (Original)
-function script.onChatMessage(message, author)
-    ac.log("LUA_DEBUG: script.onChatMessage triggered. Msg='" .. message .. "'")
-    handleChaseMessage(message, author)
-    checkChaseEnd(message)
-end
-
--- Bind to global event (Alternative 1)
-function onChatMessage(message, author)
-    ac.log("LUA_DEBUG: global onChatMessage triggered. Msg='" .. message .. "'")
-    handleChaseMessage(message, author)
-    checkChaseEnd(message)
-end
-
--- Bind using ac.onChatMessage if available (Alternative 2)
-if ac.onChatMessage then
-    ac.onChatMessage(function(message, author)
-        ac.log("LUA_DEBUG: ac.onChatMessage triggered. Msg='" .. message .. "'")
-        handleChaseMessage(message, author)
-        checkChaseEnd(message)
-    end)
-end
-
-function checkChaseEnd(message)
-    if message:find("CHASE_END") then
-        local l_id_str = message:match("CHASE_END:%s*(%d+)")
-        local l_id = tonumber(l_id_str)
-        if l_id then
-            if battleActive and carLeader and carLeader.index == l_id then endBattle() end
-        else
-            if battleActive then endBattle() end
-        end
+        ui.endTransparentWindow()
     end
 end
 
-
-
-function endBattle()
-    battleActive = false
-    carLeader = nil
-    carChaser = nil
-    role = "SPECTATOR"
-    battleOpponentName = ""
-    ac.log("Battle Ended")
-end
-
-function teleportToGrid(gridIndex)
-    local nodeName = "AC_START_" .. gridIndex
-    ac.log("TELEPORT DEBUG: Attempting teleport to " .. nodeName)
-    
-    local car = ac.getCar(ac.getSim().focusedCar)
-    if not car then 
-        ac.log("TELEPORT DEBUG: Car object not found")
-        return 
-    end
-
-    if not car.physicsAvailable then
-        ac.log("TELEPORT DEBUG: Car physics NOT available (physicsAvailable=false)")
-        return
-    end
-
-    -- Try to find the specific spawn node for this grid index (e.g. AC_START_0, AC_START_1)
-    -- This is better for curved tracks as the track author placed them correctly.
-    local node = ac.findNodes(nodeName) 
-    local useFallback = false
-
-    if not node then
-        ac.log("TELEPORT DEBUG: Node " .. nodeName .. " missing. Trying fallback to AC_START_0")
-        node = ac.findNodes("AC_START_0") 
-        useFallback = true
-    end
-    
-    if node then
-        -- Use Raw transform as standard one returns nil/is missing
-        local matrix = node:getWorldTransformationRaw() 
-        if matrix then
-             -- Access fields directly
-             local position = matrix.position
-             local nodeLook = matrix.look      -- The node's alignment
-             local up = matrix.up
-
-             if not position then 
-                 ac.log("TELEPORT DEBUG: Position vector is nil")
-                 ac.sendChatMessage("/chasereport ERROR_POS_NIL")
-                 return 
-             end
-             
-             -- 1. Orientation: User confirmed "Reversed is correct" for direction.
-             local carLook = -nodeLook 
-
-             -- 2. Position: 
-             -- If we found the specific node (e.g. AC_START_1), use its position directly.
-             -- If we are using Fallback (AC_START_0 for everyone), THEN calculate offset.
-             if useFallback and gridIndex > 0 then
-                 -- Tandem Offset: Move BACKWARDS along the CAR'S LOOK vector.
-                 -- If carLook is Downhill, -carLook is Uphill (Behind).
-                 position = position - carLook * (14 * gridIndex) 
-                 ac.log(string.format("TELEPORT DEBUG: Calculated Fallback Pos (Behind) for Index %d", gridIndex))
-             else
-                 ac.log(string.format("TELEPORT DEBUG: Using Native Node Pos for Index %d", gridIndex))
-             end
-
-             -- Raycast to ensure we are on ground
-             local groundY = physics.raycastTrack(position + vec3(0, 2, 0), vec3(0, -1, 0), 10)
-             if groundY ~= -1 then
-                 position.y = position.y + 2 - groundY
-             end
-             
-             -- Occupancy Check: Ensure no other car is at the target position
-             local sim = ac.getSim()
-             for i = 0, sim.carsCount - 1 do
-                 if i ~= car.index then
-                     local otherCar = ac.getCar(i)
-                     if otherCar and otherCar.isConnected then
-                          local dist = math.distance(otherCar.position, position)
-                          if dist < 5.0 then -- 5 meters safety radius
-                              ac.log(string.format("TELEPORT DEBUG: Spawn Occupied by Car %d (Dist: %.2f)", i, dist))
-                              ui.toast(ui.Icons.Warning, "Spawn point occupied! Retrying...")
-                              ac.sendChatMessage("/chasereport ERROR_OCCUPIED")
-                              return
-                          end
-                     end
-                 end
-             end
-             
-             if physics and physics.setCarPosition then
-                 physics.setCarPosition(car.index, position, carLook, up)
-                 if physics.setCarVelocity then
-                     physics.setCarVelocity(car.index, vec3(0,0,0))
-                 end
-                 ac.log("TELEPORT DEBUG: Teleport command sent for car " .. car.index)
-                 ui.toast(ui.Icons.Confirm, "Teleported to " .. nodeName)
-                 
-                 -- Trigger Countdown
-                 if battleActive then
-                     countdownActive = true
-                     countdownTimer = 5.0 -- 5 seconds countdown
-                     
-                     -- Store Freeze Position
-                     countdownFreezePos = position
-                     countdownFreezeLook = carLook
-                     countdownFreezeUp = up
-                     
-                     ac.log("Countdown Started (Freeze Location Set)")
-                 end
-             else
-                 ac.log("TELEPORT DEBUG: Teleport failed: physics.setCarPosition missing")
-                 ac.sendChatMessage("/chasereport ERROR_NO_PHYSICS_API")
-             end
-        else
-             ac.log("TELEPORT DEBUG: Teleport failed: Matrix missing")
-             ac.sendChatMessage("/chasereport ERROR_NO_MATRIX")
-        end
-    else
-        local msg = "Spawn point " .. nodeName .. " and AC_START_0 missing! Track might not support race mode."
-        ac.log(msg)
-        ac.sendChatMessage("/chasereport ERROR_NO_SPAWN") 
-        ui.toast(ui.Icons.Warning, msg)
+function ac.onChatMessage(msg, senderName, senderId)
+    -- Filter system messages
+    if senderId == -1 or senderName == "Server" then
+        CB_Network.ProcessMessage(msg)
     end
 end
 
-
--- Teleport Logic (Client-Side Fallback)
-function script.onConsoleCommand(command, args)
-    if command == "teleport_start" then
-        local carRoot = ac.findNodes('carRoot:0')
-        if carRoot then
-            carRoot:setPosition(vec3(0, 0, 0)) -- Replace with actual start coordinates
-            ac.log("Teleported to start (0,0,0)")
-        end
-    elseif command == "lock_input" then
-        inputLocked = not inputLocked
-        ac.log("Input Locked: " .. tostring(inputLocked))
-    end
-end
+-- Init
+CB_Config.Init()
