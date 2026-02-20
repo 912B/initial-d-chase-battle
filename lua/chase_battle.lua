@@ -117,7 +117,7 @@ function CB_Admin.Update(dt)
     end
 end
 
-function script.windowAdmin(dt)
+function script.windowMain(dt)
     if not CB_Admin.IsAdmin then return end
 
     ui.beginOutline()
